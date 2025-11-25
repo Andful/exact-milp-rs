@@ -1,0 +1,289 @@
+use num::rational::Ratio;
+use scip_sys::*;
+use std::ffi::c_uint;
+use std::ffi::CString;
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
+use std::ptr::null_mut;
+use std::ptr::NonNull;
+use std::str::FromStr;
+
+type InvariantLifetime<'brand> = std::marker::PhantomData<fn(&'brand ()) -> &'brand ()>;
+
+pub struct Solution<'a, 'brand> {
+    problem: &'a Problem<'brand>,
+    sol: NonNull<SCIP_SOL>,
+}
+
+impl <'a, 'brand> Solution<'a, 'brand> {
+    pub fn value(&self, var: Var<'brand>) -> Ratio<isize> {
+        let mut res: *mut SCIP_Rational = null_mut();
+        unsafe {
+            SCIPrationalCreate(&mut res);
+            
+            SCIPgetSolValExact (self.problem.scip.as_ptr(), self.sol.as_ptr(), var.var.as_ptr(), res);
+            let result = Ratio::new(SCIPrationalNumerator(res) as isize, SCIPrationalDenominator(res) as isize);
+            SCIPrationalFree(&mut res);
+            result
+        }
+    }
+}
+
+pub struct Problem<'brand> {
+    scip: NonNull<SCIP>,
+    vars: Vec<NonNull<SCIP_Var>>,
+    cons: Vec<NonNull<SCIP_Cons>>,
+    _marker: InvariantLifetime<'brand>,
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
+pub struct Var<'brand> {
+    var: NonNull<SCIP_Var>,
+    _marker: InvariantLifetime<'brand>,
+}
+
+pub struct VarBuilder<'a, 'brand> {
+    problem: &'a Problem<'brand>,
+    var: NonNull<SCIP_Var>,
+    _marker: InvariantLifetime<'brand>,
+}
+
+impl <'a, 'brand> VarBuilder<'a, 'brand> {
+    pub fn lb(self, lb: Ratio<isize>) -> Self {
+        let mut new_lb: *mut SCIP_Rational = null_mut();
+        unsafe {
+            SCIPrationalCreate(&mut new_lb);
+            SCIPrationalSetFraction(
+                new_lb,
+                *lb.numer() as i64,
+                *lb.denom() as i64,
+            );
+            SCIPchgVarLbExact(self.problem.scip.as_ptr(), self.var.as_ptr(), new_lb);
+            SCIPrationalFree(&mut new_lb);
+        };
+        self
+    }
+
+    pub fn ub(self, ub: Ratio<isize>) -> Self {
+        let mut new_ub: *mut SCIP_Rational = null_mut();
+        unsafe {
+            SCIPrationalCreate(&mut new_ub);
+            SCIPrationalSetFraction(
+                new_ub,
+                *ub.numer() as i64,
+                *ub.denom() as i64,
+            );
+            SCIPchgVarUbExact(self.problem.scip.as_ptr(), self.var.as_ptr(), new_ub);
+            SCIPrationalFree(&mut new_ub);
+        };
+        self
+    }
+
+    pub fn obj(self, obj: Ratio<isize>) -> Self {
+        let mut new_obj: *mut SCIP_Rational = null_mut();
+        unsafe {
+            SCIPrationalCreate(&mut new_obj);
+            SCIPrationalSetFraction(
+                new_obj,
+                *obj.numer() as i64,
+                *obj.denom() as i64,
+            );
+            SCIPchgVarObjExact(self.problem.scip.as_ptr(), self.var.as_ptr(), new_obj);
+            SCIPrationalFree(&mut new_obj);
+        };
+        self
+    }
+
+    pub fn integer(self) -> Self {
+        let mut _b: c_uint = 0;
+        unsafe {
+            SCIPchgVarType(self.problem.scip.as_ptr(), self.var.as_ptr(), SCIP_Vartype_SCIP_VARTYPE_INTEGER, &mut _b);
+        }
+        self
+    }
+
+    pub fn build(self) -> Var<'brand> {
+        let Self { var, ..} = self;
+        unsafe { SCIPaddVar(self.problem.scip.as_ptr(), var.as_ptr()) };
+        Var {
+            var,
+            _marker: Default::default(),
+        }
+    }
+}
+
+impl<'brand> Problem<'brand> {
+    pub fn new<R, F>(name: &str, fun: F) -> R
+    where
+        for<'new_brand> F: FnOnce(&mut Problem<'new_brand>) -> R,
+    {
+        let mut scip = null_mut();
+
+        unsafe {
+            SCIPcreate(&mut scip);
+            SCIPincludeDefaultPlugins(scip);
+            SCIPenableExactSolving(scip, 1);
+            SCIPcreateProbBasic(scip, CString::new(name).unwrap().as_ptr());
+        };
+
+        let mut problem = Self {
+            scip: NonNull::new(scip).unwrap(),
+            vars: Vec::new(),
+            cons: Vec::new(),
+            _marker: InvariantLifetime::default(),
+        };
+
+        let result = fun(&mut problem);
+
+        let Self {
+            scip, vars, cons, ..
+        } = problem;
+        for v in vars {
+            unsafe { SCIPreleaseVar(scip.as_ptr(), &mut v.as_ptr()) };
+        }
+        for c in cons {
+            unsafe { SCIPreleaseCons(scip.as_ptr(), &mut c.as_ptr()) };
+        }
+        unsafe { SCIPfree(&mut scip.as_ptr()) };
+
+        result
+    }
+
+    pub fn var(&mut self, name: &str) -> VarBuilder<'_, 'brand> {
+        let mut var: *mut SCIP_Var = null_mut();
+        unsafe {
+            SCIPcreateVarBasic(
+                self.scip.as_ptr(),
+                &mut var,
+                CString::from_str(name).unwrap().as_c_str().as_ptr(),
+                -SCIPinfinity(self.scip.as_ptr()),
+                SCIPinfinity(self.scip.as_ptr()),
+                0.0,
+                SCIP_Vartype_SCIP_VARTYPE_CONTINUOUS,
+            );
+            SCIPaddVarExactData(self.scip.as_ptr(), var, null_mut(), null_mut(), null_mut())
+        };
+
+        let var = NonNull::new(var).unwrap();
+
+        self.vars.push(var);
+
+        VarBuilder {
+            var,
+            problem: self,
+            _marker: Default::default(),
+        }
+    }
+
+    pub fn add_constraint(&mut self, name: &str, lhs: Option<Ratio<isize>>, vals: &[Ratio<isize>], vars: &[Var<'brand>], rhs: Option<Ratio<isize>>) {
+        assert_eq!(vals.len(), vars.len());
+        let mut cons = null_mut();
+        let mut rationals: *mut *mut SCIP_RATIONAL = null_mut();
+        unsafe {
+            SCIPrationalCreateArray(&mut rationals, vals.len() as i32 + 2);
+            let lhs_rational = *rationals.offset(vals.len() as isize);
+            if let Some(lhs) = lhs {
+                SCIPrationalSetFraction(
+                    lhs_rational,
+                    *lhs.numer() as i64,
+                    *lhs.denom() as i64,
+                );
+            } else {
+                SCIPrationalSetNegInfinity(lhs_rational);
+            }
+            let rhs_rational = *rationals.offset(vals.len() as isize + 1);
+            if let Some(rhs) = rhs {
+                SCIPrationalSetFraction(
+                    rhs_rational,
+                    *rhs.numer() as i64,
+                    *rhs.denom() as i64,
+                );
+            } else {
+                SCIPrationalSetInfinity(rhs_rational);
+            }
+            for i in 0..vals.len() {
+                SCIPrationalSetFraction(
+                    *rationals.offset(i as isize),
+                    *vals[i].numer() as i64,
+                    *vals[i].denom() as i64,
+                );
+            }
+            SCIPcreateConsBasicExactLinear(
+                self.scip.as_ptr(),
+                &mut cons,
+                CString::from_str(name).unwrap().as_c_str().as_ptr(),
+                vars.len() as i32,
+                vars.iter().map(|e| e.var.as_ptr()).collect::<Vec<_>>().as_mut_ptr(),
+                rationals,
+                lhs_rational,
+                rhs_rational,
+            );
+            SCIPrationalFreeArray(&mut rationals, vals.len() as i32 + 2);
+
+            SCIPaddCons(self.scip.as_ptr(), cons);
+        }
+    }
+
+    pub fn solve(&self) -> Solution<'_, 'brand> {
+        let solution : *mut SCIP_SOL = unsafe {
+            SCIPsolve(self.scip.as_ptr());
+            SCIPgetBestSol (self.scip.as_ptr())
+        };
+
+        Solution { problem: self, sol: NonNull::new(solution).unwrap() }
+    }
+
+    pub fn export(&self, path: &Path) {
+        unsafe {
+            SCIPwriteOrigProblem(self.scip.as_ptr(), CString::new(path.as_os_str().as_bytes()).ok().unwrap().as_ptr(), c"lp".as_ptr(), FALSE);
+        }
+    }
+
+    pub fn export_solution(&self, path: &Path) {
+        unsafe {
+            SCIPwriteOrigProblem(self.scip.as_ptr(), CString::new(path.as_os_str().as_bytes()).ok().unwrap().as_ptr(), c"sol".as_ptr(), FALSE);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test1() {
+        Problem::new("problem", |problem| {
+            // eample from https://www.mathsisfun.com/algebra/linear-programming.html
+            let b = problem.var("b").obj(Ratio::from_integer(-300))
+            .integer()
+            .build();
+            let s = problem.var("s").obj(Ratio::from_integer(-350))
+            .integer()
+            .build();
+
+            problem.add_constraint(
+                "c1",
+                None,
+                &[Ratio::from_integer(5), Ratio::from_integer(4)],
+                &[b, s],
+                Some(Ratio::from_integer(80))
+            );
+
+            problem.add_constraint(
+                "c2",
+                None,
+                &[Ratio::from_integer(3), Ratio::from_integer(4)],
+                &[b, s],
+                Some(Ratio::from_integer(60))
+            );
+
+            let solution = problem.solve();
+
+            problem.export(&Path::new("test.lp"));
+
+            println!("b:{} s:{}", solution.value(b), solution.value(s));
+
+            problem.export_solution(&Path::new("test.lp"));
+        });
+    }
+}
