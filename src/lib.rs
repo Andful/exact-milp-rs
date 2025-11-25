@@ -1,11 +1,11 @@
 use num::rational::Ratio;
 use scip_sys::*;
-use std::ffi::c_uint;
 use std::ffi::CString;
+use std::ffi::c_uint;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
-use std::ptr::null_mut;
 use std::ptr::NonNull;
+use std::ptr::null_mut;
 use std::str::FromStr;
 
 type InvariantLifetime<'brand> = std::marker::PhantomData<fn(&'brand ()) -> &'brand ()>;
@@ -15,14 +15,22 @@ pub struct Solution<'a, 'brand> {
     sol: NonNull<SCIP_SOL>,
 }
 
-impl <'a, 'brand> Solution<'a, 'brand> {
+impl<'a, 'brand> Solution<'a, 'brand> {
     pub fn value(&self, var: Var<'brand>) -> Ratio<isize> {
         let mut res: *mut SCIP_Rational = null_mut();
         unsafe {
             SCIPrationalCreate(&mut res);
-            
-            SCIPgetSolValExact (self.problem.scip.as_ptr(), self.sol.as_ptr(), var.var.as_ptr(), res);
-            let result = Ratio::new(SCIPrationalNumerator(res) as isize, SCIPrationalDenominator(res) as isize);
+
+            SCIPgetSolValExact(
+                self.problem.scip.as_ptr(),
+                self.sol.as_ptr(),
+                var.var.as_ptr(),
+                res,
+            );
+            let result = Ratio::new(
+                SCIPrationalNumerator(res) as isize,
+                SCIPrationalDenominator(res) as isize,
+            );
             SCIPrationalFree(&mut res);
             result
         }
@@ -48,16 +56,12 @@ pub struct VarBuilder<'a, 'brand> {
     _marker: InvariantLifetime<'brand>,
 }
 
-impl <'a, 'brand> VarBuilder<'a, 'brand> {
+impl<'a, 'brand> VarBuilder<'a, 'brand> {
     pub fn lb(self, lb: Ratio<isize>) -> Self {
         let mut new_lb: *mut SCIP_Rational = null_mut();
         unsafe {
             SCIPrationalCreate(&mut new_lb);
-            SCIPrationalSetFraction(
-                new_lb,
-                *lb.numer() as i64,
-                *lb.denom() as i64,
-            );
+            SCIPrationalSetFraction(new_lb, *lb.numer() as i64, *lb.denom() as i64);
             SCIPchgVarLbExact(self.problem.scip.as_ptr(), self.var.as_ptr(), new_lb);
             SCIPrationalFree(&mut new_lb);
         };
@@ -68,11 +72,7 @@ impl <'a, 'brand> VarBuilder<'a, 'brand> {
         let mut new_ub: *mut SCIP_Rational = null_mut();
         unsafe {
             SCIPrationalCreate(&mut new_ub);
-            SCIPrationalSetFraction(
-                new_ub,
-                *ub.numer() as i64,
-                *ub.denom() as i64,
-            );
+            SCIPrationalSetFraction(new_ub, *ub.numer() as i64, *ub.denom() as i64);
             SCIPchgVarUbExact(self.problem.scip.as_ptr(), self.var.as_ptr(), new_ub);
             SCIPrationalFree(&mut new_ub);
         };
@@ -83,11 +83,7 @@ impl <'a, 'brand> VarBuilder<'a, 'brand> {
         let mut new_obj: *mut SCIP_Rational = null_mut();
         unsafe {
             SCIPrationalCreate(&mut new_obj);
-            SCIPrationalSetFraction(
-                new_obj,
-                *obj.numer() as i64,
-                *obj.denom() as i64,
-            );
+            SCIPrationalSetFraction(new_obj, *obj.numer() as i64, *obj.denom() as i64);
             SCIPchgVarObjExact(self.problem.scip.as_ptr(), self.var.as_ptr(), new_obj);
             SCIPrationalFree(&mut new_obj);
         };
@@ -97,13 +93,18 @@ impl <'a, 'brand> VarBuilder<'a, 'brand> {
     pub fn integer(self) -> Self {
         let mut _b: c_uint = 0;
         unsafe {
-            SCIPchgVarType(self.problem.scip.as_ptr(), self.var.as_ptr(), SCIP_Vartype_SCIP_VARTYPE_INTEGER, &mut _b);
+            SCIPchgVarType(
+                self.problem.scip.as_ptr(),
+                self.var.as_ptr(),
+                SCIP_Vartype_SCIP_VARTYPE_INTEGER,
+                &mut _b,
+            );
         }
         self
     }
 
     pub fn build(self) -> Var<'brand> {
-        let Self { var, ..} = self;
+        let Self { var, .. } = self;
         unsafe { SCIPaddVar(self.problem.scip.as_ptr(), var.as_ptr()) };
         Var {
             var,
@@ -138,11 +139,13 @@ impl<'brand> Problem<'brand> {
         let Self {
             scip, vars, cons, ..
         } = problem;
-        for v in vars {
-            unsafe { SCIPreleaseVar(scip.as_ptr(), &mut v.as_ptr()) };
+        for mut c in cons.into_iter().map(|c| c.as_ptr()) {
+            unsafe { SCIPreleaseCons(scip.as_ptr(), &mut c) };
         }
-        for c in cons {
-            unsafe { SCIPreleaseCons(scip.as_ptr(), &mut c.as_ptr()) };
+        for mut v in vars.into_iter().map(|v| v.as_ptr()) {
+            unsafe {
+                SCIPreleaseVar(scip.as_ptr(), &mut v);
+            };
         }
         unsafe { SCIPfree(&mut scip.as_ptr()) };
 
@@ -161,7 +164,7 @@ impl<'brand> Problem<'brand> {
                 0.0,
                 SCIP_Vartype_SCIP_VARTYPE_CONTINUOUS,
             );
-            SCIPaddVarExactData(self.scip.as_ptr(), var, null_mut(), null_mut(), null_mut())
+            SCIPaddVarExactData(self.scip.as_ptr(), var, null_mut(), null_mut(), null_mut());
         };
 
         let var = NonNull::new(var).unwrap();
@@ -175,7 +178,14 @@ impl<'brand> Problem<'brand> {
         }
     }
 
-    pub fn add_constraint(&mut self, name: &str, lhs: Option<Ratio<isize>>, vals: &[Ratio<isize>], vars: &[Var<'brand>], rhs: Option<Ratio<isize>>) {
+    pub fn add_constraint(
+        &mut self,
+        name: &str,
+        lhs: Option<Ratio<isize>>,
+        vals: &[Ratio<isize>],
+        vars: &[Var<'brand>],
+        rhs: Option<Ratio<isize>>,
+    ) {
         assert_eq!(vals.len(), vars.len());
         let mut cons = null_mut();
         let mut rationals: *mut *mut SCIP_RATIONAL = null_mut();
@@ -183,21 +193,13 @@ impl<'brand> Problem<'brand> {
             SCIPrationalCreateArray(&mut rationals, vals.len() as i32 + 2);
             let lhs_rational = *rationals.offset(vals.len() as isize);
             if let Some(lhs) = lhs {
-                SCIPrationalSetFraction(
-                    lhs_rational,
-                    *lhs.numer() as i64,
-                    *lhs.denom() as i64,
-                );
+                SCIPrationalSetFraction(lhs_rational, *lhs.numer() as i64, *lhs.denom() as i64);
             } else {
                 SCIPrationalSetNegInfinity(lhs_rational);
             }
             let rhs_rational = *rationals.offset(vals.len() as isize + 1);
             if let Some(rhs) = rhs {
-                SCIPrationalSetFraction(
-                    rhs_rational,
-                    *rhs.numer() as i64,
-                    *rhs.denom() as i64,
-                );
+                SCIPrationalSetFraction(rhs_rational, *rhs.numer() as i64, *rhs.denom() as i64);
             } else {
                 SCIPrationalSetInfinity(rhs_rational);
             }
@@ -213,7 +215,10 @@ impl<'brand> Problem<'brand> {
                 &mut cons,
                 CString::from_str(name).unwrap().as_c_str().as_ptr(),
                 vars.len() as i32,
-                vars.iter().map(|e| e.var.as_ptr()).collect::<Vec<_>>().as_mut_ptr(),
+                vars.iter()
+                    .map(|e| e.var.as_ptr())
+                    .collect::<Vec<_>>()
+                    .as_mut_ptr(),
                 rationals,
                 lhs_rational,
                 rhs_rational,
@@ -222,26 +227,29 @@ impl<'brand> Problem<'brand> {
 
             SCIPaddCons(self.scip.as_ptr(), cons);
         }
+        self.cons.push(NonNull::new(cons).unwrap());
     }
 
-    pub fn solve(&self) -> Solution<'_, 'brand> {
-        let solution : *mut SCIP_SOL = unsafe {
+    pub fn solve(&self) -> Option<Solution<'_, 'brand>> {
+        let solution: *mut SCIP_SOL = unsafe {
             SCIPsolve(self.scip.as_ptr());
-            SCIPgetBestSol (self.scip.as_ptr())
+            SCIPgetBestSol(self.scip.as_ptr())
         };
 
-        Solution { problem: self, sol: NonNull::new(solution).unwrap() }
+        NonNull::new(solution).map(|sol| Solution { problem: self, sol })
     }
 
     pub fn export(&self, path: &Path) {
         unsafe {
-            SCIPwriteOrigProblem(self.scip.as_ptr(), CString::new(path.as_os_str().as_bytes()).ok().unwrap().as_ptr(), c"lp".as_ptr(), FALSE);
-        }
-    }
-
-    pub fn export_solution(&self, path: &Path) {
-        unsafe {
-            SCIPwriteOrigProblem(self.scip.as_ptr(), CString::new(path.as_os_str().as_bytes()).ok().unwrap().as_ptr(), c"sol".as_ptr(), FALSE);
+            SCIPwriteOrigProblem(
+                self.scip.as_ptr(),
+                CString::new(path.as_os_str().as_bytes())
+                    .ok()
+                    .unwrap()
+                    .as_ptr(),
+                c"lp".as_ptr(),
+                FALSE,
+            );
         }
     }
 }
@@ -254,19 +262,23 @@ mod tests {
     fn test1() {
         Problem::new("problem", |problem| {
             // eample from https://www.mathsisfun.com/algebra/linear-programming.html
-            let b = problem.var("b").obj(Ratio::from_integer(-300))
-            .integer()
-            .build();
-            let s = problem.var("s").obj(Ratio::from_integer(-350))
-            .integer()
-            .build();
+            let b = problem
+                .var("b")
+                .obj(Ratio::from_integer(-300))
+                .integer()
+                .build();
+            let s = problem
+                .var("s")
+                .obj(Ratio::from_integer(-350))
+                .integer()
+                .build();
 
             problem.add_constraint(
                 "c1",
                 None,
                 &[Ratio::from_integer(5), Ratio::from_integer(4)],
                 &[b, s],
-                Some(Ratio::from_integer(80))
+                Some(Ratio::from_integer(80)),
             );
 
             problem.add_constraint(
@@ -274,16 +286,14 @@ mod tests {
                 None,
                 &[Ratio::from_integer(3), Ratio::from_integer(4)],
                 &[b, s],
-                Some(Ratio::from_integer(60))
+                Some(Ratio::from_integer(60)),
             );
 
-            let solution = problem.solve();
+            let solution = problem.solve().unwrap();
 
-            problem.export(&Path::new("test.lp"));
+            //problem.export(&Path::new("test.lp"));
 
             println!("b:{} s:{}", solution.value(b), solution.value(s));
-
-            problem.export_solution(&Path::new("test.lp"));
         });
     }
 }
