@@ -6,7 +6,55 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr::NonNull;
 use std::ptr::null_mut;
-use std::str::FromStr;
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum Status {
+    Unknown,
+    UserInterrupt,
+    NodeLimit,
+    TotalNodeLimit,
+    StallNodeLimit,
+    TimeLimit,
+    MemoryLimit,
+    GapLimit,
+    PrimalLimit,
+    DualLimit,
+    SolutionLimit,
+    BestSolutionLimit,
+    RestartLimit,
+    Optimal,
+    Infeasible,
+    Unbounded,
+    Inforunbd,
+    Terminate,
+}
+
+impl From<SCIP_Status> for Status {
+    /// Converts a u32 value to a `Status` enum variant.
+    fn from(val: SCIP_Status) -> Self {
+        match val {
+            SCIP_Status_SCIP_STATUS_UNKNOWN => Status::Unknown,
+            SCIP_Status_SCIP_STATUS_USERINTERRUPT => Status::UserInterrupt,
+            SCIP_Status_SCIP_STATUS_NODELIMIT => Status::NodeLimit,
+            SCIP_Status_SCIP_STATUS_TOTALNODELIMIT => Status::TotalNodeLimit,
+            SCIP_Status_SCIP_STATUS_STALLNODELIMIT => Status::StallNodeLimit,
+            SCIP_Status_SCIP_STATUS_TIMELIMIT => Status::TimeLimit,
+            SCIP_Status_SCIP_STATUS_MEMLIMIT => Status::MemoryLimit,
+            SCIP_Status_SCIP_STATUS_GAPLIMIT => Status::GapLimit,
+            SCIP_Status_SCIP_STATUS_PRIMALLIMIT => Status::PrimalLimit,
+            SCIP_Status_SCIP_STATUS_DUALLIMIT => Status::DualLimit,
+            SCIP_Status_SCIP_STATUS_SOLLIMIT => Status::SolutionLimit,
+            SCIP_Status_SCIP_STATUS_BESTSOLLIMIT => Status::BestSolutionLimit,
+            SCIP_Status_SCIP_STATUS_RESTARTLIMIT => Status::RestartLimit,
+            SCIP_Status_SCIP_STATUS_OPTIMAL => Status::Optimal,
+            SCIP_Status_SCIP_STATUS_INFEASIBLE => Status::Infeasible,
+            SCIP_Status_SCIP_STATUS_UNBOUNDED => Status::Unbounded,
+            SCIP_Status_SCIP_STATUS_INFORUNBD => Status::Inforunbd,
+            SCIP_Status_SCIP_STATUS_TERMINATE => Status::Terminate,
+            _ => panic!("Unknown SCIP status {val:?}"),
+        }
+    }
+}
 
 type InvariantLifetime<'brand> = std::marker::PhantomData<fn(&'brand ()) -> &'brand ()>;
 
@@ -158,7 +206,7 @@ impl<'brand> Problem<'brand> {
             SCIPcreateVarBasic(
                 self.scip.as_ptr(),
                 &mut var,
-                CString::from_str(name).unwrap().as_c_str().as_ptr(),
+                CString::new(name).unwrap().as_c_str().as_ptr(),
                 -SCIPinfinity(self.scip.as_ptr()),
                 SCIPinfinity(self.scip.as_ptr()),
                 0.0,
@@ -213,7 +261,7 @@ impl<'brand> Problem<'brand> {
             SCIPcreateConsBasicExactLinear(
                 self.scip.as_ptr(),
                 &mut cons,
-                CString::from_str(name).unwrap().as_c_str().as_ptr(),
+                CString::new(name).unwrap().as_c_str().as_ptr(),
                 vars.len() as i32,
                 vars.iter()
                     .map(|e| e.var.as_ptr())
@@ -239,12 +287,23 @@ impl<'brand> Problem<'brand> {
         NonNull::new(solution).map(|sol| Solution { problem: self, sol })
     }
 
-    pub fn set_bool_param(&self, param: &str, value: bool) {
-        let param = CString::new(param).unwrap();
-        unsafe { SCIPsetBoolParam(self.scip.as_ptr(), param.as_ptr(), if value { 1u32 } else { 0u32 }) };
+    pub fn status(&self) -> Status {
+        let status = unsafe { SCIPgetStatus(self.scip.as_ptr()) };
+        status.into()
     }
 
-    pub fn set_int_param(&self, param: &str, value: i32)  {
+    pub fn set_bool_param(&self, param: &str, value: bool) {
+        let param = CString::new(param).unwrap();
+        unsafe {
+            SCIPsetBoolParam(
+                self.scip.as_ptr(),
+                param.as_ptr(),
+                if value { 1u32 } else { 0u32 },
+            )
+        };
+    }
+
+    pub fn set_int_param(&self, param: &str, value: i32) {
         let param = CString::new(param).unwrap();
         unsafe { SCIPsetIntParam(self.scip.as_ptr(), param.as_ptr(), value) };
     }
