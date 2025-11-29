@@ -239,6 +239,26 @@ impl<'brand> Problem<'brand> {
         NonNull::new(solution).map(|sol| Solution { problem: self, sol })
     }
 
+    pub fn set_bool_param(&self, param: &str, value: bool) {
+        let param = CString::new(param).unwrap();
+        unsafe { SCIPsetBoolParam(self.scip.as_ptr(), param.as_ptr(), if value { 1u32 } else { 0u32 }) };
+    }
+
+    pub fn set_int_param(&self, param: &str, value: i32)  {
+        let param = CString::new(param).unwrap();
+        unsafe { SCIPsetIntParam(self.scip.as_ptr(), param.as_ptr(), value) };
+    }
+
+    pub fn set_longint_param(&self, param: &str, value: i64) {
+        let param = CString::new(param).unwrap();
+        unsafe { SCIPsetLongintParam(self.scip.as_ptr(), param.as_ptr(), value) };
+    }
+
+    pub fn set_real_param(&self, param: &str, value: f64) {
+        let param = CString::new(param).unwrap();
+        unsafe { SCIPsetRealParam(self.scip.as_ptr(), param.as_ptr(), value) };
+    }
+
     pub fn export(&self, path: &Path) {
         unsafe {
             SCIPwriteOrigProblem(
