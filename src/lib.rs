@@ -2,10 +2,55 @@ use num::rational::Ratio;
 use scip_sys::*;
 use std::ffi::CString;
 use std::ffi::c_uint;
+use std::mem::ManuallyDrop;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr::NonNull;
 use std::ptr::null_mut;
+
+pub enum ConshdlrResult {
+    /// States that the problem is feasible.
+    Feasible,
+    /// States that the problem is infeasible.
+    CutOff,
+    /// Added another constraint that resolves the infeasibility.
+    ConsAdded,
+    /// Reduced the domain of a variable.
+    ReducedDom,
+    /// Added a cutting plane that separates the lp solution.
+    Separated,
+    /// Request to resolve the LP.
+    SolveLP,
+    /// Created a branching.
+    Branched,
+}
+
+impl From<ConshdlrResult> for SCIP_Result {
+    fn from(result: ConshdlrResult) -> Self {
+        match result {
+            ConshdlrResult::Feasible => SCIP_Result_SCIP_FEASIBLE,
+            ConshdlrResult::CutOff => SCIP_Result_SCIP_CUTOFF,
+            ConshdlrResult::ConsAdded => SCIP_Result_SCIP_CONSADDED,
+            ConshdlrResult::ReducedDom => SCIP_Result_SCIP_REDUCEDDOM,
+            ConshdlrResult::Separated => SCIP_Result_SCIP_SEPARATED,
+            ConshdlrResult::SolveLP => SCIP_Result_SCIP_SOLVELP,
+            ConshdlrResult::Branched => SCIP_Result_SCIP_BRANCHED,
+        }
+    }
+}
+
+pub trait Conshdlr {
+    // Required methods
+    fn check<'brand>(
+        &mut self,
+        problem: &Problem<'brand>,
+        solution: &Solution<'_, 'brand>
+    ) -> bool;
+    fn enforce<'brand>(
+        &mut self,
+        problem: &Problem<'brand>
+    ) -> ConshdlrResult;
+}
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Status {
@@ -330,6 +375,126 @@ impl<'brand> Problem<'brand> {
                 FALSE,
             );
         }
+    }
+
+    pub fn include_conshdlr<'a, C: Conshdlr + 'a>(
+        &'a self,
+        name: &str,
+        desc: &str,
+        enfopriority: i32,
+        checkpriority: i32,
+        conshdlr: &'a C,
+    ) {
+        let c_name = CString::new(name).unwrap();
+        let c_desc = CString::new(desc).unwrap();
+
+        extern "C" fn consenfolp<'brand, C: Conshdlr>(
+            scip: *mut SCIP,
+            conshdlr: *mut SCIP_CONSHDLR,
+            _conss: *mut *mut SCIP_CONS,
+            _nconss: std::os::raw::c_int,
+            _nusefulconss: std::os::raw::c_int,
+            _solinfeasible: std::os::raw::c_uint,
+            result: *mut SCIP_RESULT,
+        ) -> SCIP_RETCODE {
+            let problem = ManuallyDrop::new(Problem {
+                scip: NonNull::new(scip).unwrap(),
+                vars: vec![],
+                cons: vec![],
+                _marker: Default::default()
+            });
+            let data_ptr = unsafe { SCIPconshdlrGetData(conshdlr) };
+            assert!(!data_ptr.is_null());
+            let conshdlr_ptr = data_ptr as *mut C;
+
+            unsafe {
+                *result = (*conshdlr_ptr).enforce(&problem).into();
+            }
+
+            SCIP_Retcode_SCIP_OKAY
+        }
+
+        extern "C" fn conscheck<'brand, C: Conshdlr>(
+            scip: *mut SCIP,
+            conshdlr: *mut SCIP_CONSHDLR,
+            _conss: *mut *mut SCIP_CONS,
+            _nconss: ::std::os::raw::c_int,
+            sol: *mut SCIP_SOL,
+            _checkintegrality: ::std::os::raw::c_uint,
+            _checklprows: ::std::os::raw::c_uint,
+            _printreason: ::std::os::raw::c_uint,
+            _completely: ::std::os::raw::c_uint,
+            result: *mut SCIP_RESULT,
+        ) -> SCIP_RETCODE {
+            let problem = ManuallyDrop::new(Problem {
+                scip: NonNull::new(scip).unwrap(),
+                vars: vec![],
+                cons: vec![],
+                _marker: Default::default()
+            });
+            let solution = ManuallyDrop::new(Solution {
+                problem: &problem,
+                sol: NonNull::new(sol).unwrap(),
+            });
+            let data_ptr = unsafe { SCIPconshdlrGetData(conshdlr) };
+            assert!(!data_ptr.is_null());
+            let conshdlr_ptr = data_ptr as *mut C;
+
+            let feasible = unsafe { (*conshdlr_ptr).check(&problem, &solution).into() };
+
+            unsafe {
+                *result = if feasible {
+                    SCIP_Result_SCIP_FEASIBLE
+                } else {
+                    SCIP_Result_SCIP_INFEASIBLE
+                };
+            }
+
+            SCIP_Retcode_SCIP_OKAY
+        }
+
+        extern "C" fn conslock(
+            _scip: *mut SCIP,
+            _conshdlr: *mut SCIP_CONSHDLR,
+            _cons: *mut SCIP_CONS,
+            _locktype: SCIP_LOCKTYPE,
+            _nlockspos: ::std::os::raw::c_int,
+            _nlocksneg: ::std::os::raw::c_int,
+        ) -> SCIP_RETCODE {
+            SCIP_Retcode_SCIP_OKAY
+        }
+
+        extern "C" fn consfree(
+            _scip: *mut SCIP,
+            _conshdlr: *mut SCIP_CONSHDLR,
+        ) -> SCIP_Retcode {
+            SCIP_Retcode_SCIP_OKAY
+        }
+
+        let ptr = Box::into_raw(Box::new(conshdlr));
+        let cons_faker = ptr as *mut SCIP_CONSHDLRDATA;
+
+        let mut conshdlr: *mut SCIP_CONSHDLR = std::ptr::null_mut();
+
+        unsafe {
+            SCIPincludeConshdlrBasic(
+                self.scip.as_ptr(),
+                &mut conshdlr,
+                c_name.as_ptr(),
+                c_desc.as_ptr(),
+                enfopriority,
+                checkpriority,
+                0,
+                false.into(),
+                Some(consenfolp::<C>),
+                None,
+                Some(conscheck::<C>),
+                Some(conslock),
+                cons_faker,
+            );
+        }
+
+        unsafe { SCIPsetConshdlrFree(self.scip.as_ptr(), conshdlr, Some(consfree)); }
     }
 }
 
