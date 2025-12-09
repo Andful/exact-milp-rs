@@ -332,6 +332,14 @@ impl<'brand> Problem<'brand> {
         NonNull::new(solution).map(|sol| Solution { problem: self, sol })
     }
 
+    pub fn get_best_solution(&self) -> Option<Solution<'_, 'brand>> {
+        let solution: *mut SCIP_SOL = unsafe {
+            SCIPgetBestSol(self.scip.as_ptr())
+        };
+
+        NonNull::new(solution).map(|sol| Solution { problem: self, sol })
+    }
+
     pub fn status(&self) -> Status {
         let status = unsafe { SCIPgetStatus(self.scip.as_ptr()) };
         status.into()
