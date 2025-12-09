@@ -274,7 +274,7 @@ impl<'brand> Problem<'brand> {
     }
 
     pub fn add_constraint(
-        &mut self,
+        &self,
         name: &str,
         lhs: Option<Ratio<isize>>,
         vals: &[Ratio<isize>],
