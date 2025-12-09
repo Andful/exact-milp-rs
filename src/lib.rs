@@ -412,6 +412,7 @@ impl<'brand> Problem<'brand> {
             _solinfeasible: std::os::raw::c_uint,
             result: *mut SCIP_RESULT,
         ) -> SCIP_RETCODE {
+            println!("Called 3");
             let data_ptr = unsafe { SCIPconshdlrGetData(conshdlr) };
             assert!(!data_ptr.is_null());
             let data_ptr = data_ptr as *mut Data<'a, 'brand, C>;
@@ -433,6 +434,7 @@ impl<'brand> Problem<'brand> {
             _completely: ::std::os::raw::c_uint,
             result: *mut SCIP_RESULT,
         ) -> SCIP_RETCODE {
+            println!("Called 2");
             let data_ptr = unsafe { SCIPconshdlrGetData(conshdlr) };
             assert!(!data_ptr.is_null());
             let data_ptr = data_ptr as *mut Data<'a, 'brand, C>;
@@ -499,6 +501,7 @@ impl<'brand> Problem<'brand> {
         }
 
         unsafe { SCIPsetConshdlrFree(self.scip.as_ptr(), conshdlr, Some(consfree)); }
+        println!("Called 1");
     }
 }
 
