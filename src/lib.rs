@@ -471,6 +471,7 @@ impl<'brand> Problem<'brand> {
             _scip: *mut SCIP,
             _conshdlr: *mut SCIP_CONSHDLR,
         ) -> SCIP_Retcode {
+            println!("Called 4");
             SCIP_Retcode_SCIP_OKAY
         }
 
