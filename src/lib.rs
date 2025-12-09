@@ -39,14 +39,14 @@ impl From<ConshdlrResult> for SCIP_Result {
     }
 }
 
-pub trait Conshdlr {
+pub trait Conshdlr<'brand> {
     // Required methods
-    fn check<'brand>(
+    fn check(
         &mut self,
         problem: &Problem<'brand>,
         solution: &Solution<'_, 'brand>
     ) -> bool;
-    fn enforce<'brand>(
+    fn enforce(
         &mut self,
         problem: &Problem<'brand>
     ) -> ConshdlrResult;
@@ -385,7 +385,7 @@ impl<'brand> Problem<'brand> {
         }
     }
 
-    pub fn include_conshdlr<'a, C: Conshdlr + 'a>(
+    pub fn include_conshdlr<'a, C: Conshdlr<'brand> + 'a>(
         &'a self,
         name: &str,
         desc: &str,
@@ -396,7 +396,7 @@ impl<'brand> Problem<'brand> {
         let c_name = CString::new(name).unwrap();
         let c_desc = CString::new(desc).unwrap();
 
-        extern "C" fn consenfolp<'brand, C: Conshdlr>(
+        extern "C" fn consenfolp<'brand, C: Conshdlr<'brand>>(
             scip: *mut SCIP,
             conshdlr: *mut SCIP_CONSHDLR,
             _conss: *mut *mut SCIP_CONS,
@@ -422,7 +422,7 @@ impl<'brand> Problem<'brand> {
             SCIP_Retcode_SCIP_OKAY
         }
 
-        extern "C" fn conscheck<'brand, C: Conshdlr>(
+        extern "C" fn conscheck<'brand, C: Conshdlr<'brand>>(
             scip: *mut SCIP,
             conshdlr: *mut SCIP_CONSHDLR,
             _conss: *mut *mut SCIP_CONS,
