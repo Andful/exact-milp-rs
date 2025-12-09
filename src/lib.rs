@@ -133,7 +133,7 @@ impl<'a, 'brand> Solution<'a, 'brand> {
 }
 
 pub struct Problem<'brand> {
-    scip: NonNull<SCIP>,
+    pub scip: NonNull<SCIP>,
     vars: Rc<RefCell<Vec<NonNull<SCIP_Var>>>>,
     cons: Rc<RefCell<Vec<NonNull<SCIP_Cons>>>>,
     _marker: InvariantLifetime<'brand>,
