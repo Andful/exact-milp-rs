@@ -1,5 +1,6 @@
 use num::rational::Ratio;
 use scip_sys::*;
+use std::cell::RefCell;
 use std::ffi::CString;
 use std::ffi::c_uint;
 use std::mem::ManuallyDrop;
@@ -7,6 +8,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::ptr::NonNull;
 use std::ptr::null_mut;
+use std::rc::Rc;
 
 pub enum ConshdlrResult {
     /// States that the problem is feasible.
@@ -132,8 +134,8 @@ impl<'a, 'brand> Solution<'a, 'brand> {
 
 pub struct Problem<'brand> {
     scip: NonNull<SCIP>,
-    vars: Vec<NonNull<SCIP_Var>>,
-    cons: Vec<NonNull<SCIP_Cons>>,
+    vars: Rc<RefCell<Vec<NonNull<SCIP_Var>>>>,
+    cons: Rc<RefCell<Vec<NonNull<SCIP_Cons>>>>,
     _marker: InvariantLifetime<'brand>,
 }
 
@@ -222,8 +224,8 @@ impl<'brand> Problem<'brand> {
 
         let mut problem = Self {
             scip: NonNull::new(scip).unwrap(),
-            vars: Vec::new(),
-            cons: Vec::new(),
+            vars: Rc::new(RefCell::new(Vec::new())),
+            cons: Rc::new(RefCell::new(Vec::new())),
             _marker: InvariantLifetime::default(),
         };
 
@@ -232,10 +234,10 @@ impl<'brand> Problem<'brand> {
         let Self {
             scip, vars, cons, ..
         } = problem;
-        for mut c in cons.into_iter().map(|c| c.as_ptr()) {
+        for mut c in std::mem::take(&mut *cons.borrow_mut()).into_iter().map(|c| c.as_ptr()) {
             unsafe { SCIPreleaseCons(scip.as_ptr(), &mut c) };
         }
-        for mut v in vars.into_iter().map(|v| v.as_ptr()) {
+        for mut v in  std::mem::take(&mut *vars.borrow_mut()).into_iter().map(|v| v.as_ptr()) {
             unsafe {
                 SCIPreleaseVar(scip.as_ptr(), &mut v);
             };
@@ -245,7 +247,7 @@ impl<'brand> Problem<'brand> {
         result
     }
 
-    pub fn var(&mut self, name: &str) -> VarBuilder<'_, 'brand> {
+    pub fn var(&self, name: &str) -> VarBuilder<'_, 'brand> {
         let mut var: *mut SCIP_Var = null_mut();
         unsafe {
             SCIPcreateVarBasic(
@@ -262,7 +264,7 @@ impl<'brand> Problem<'brand> {
 
         let var = NonNull::new(var).unwrap();
 
-        self.vars.push(var);
+        self.vars.borrow_mut().push(var);
 
         VarBuilder {
             var,
@@ -320,7 +322,7 @@ impl<'brand> Problem<'brand> {
 
             SCIPaddCons(self.scip.as_ptr(), cons);
         }
-        self.cons.push(NonNull::new(cons).unwrap());
+        self.cons.borrow_mut().push(NonNull::new(cons).unwrap());
     }
 
     pub fn solve(&self) -> Option<Solution<'_, 'brand>> {
@@ -391,12 +393,17 @@ impl<'brand> Problem<'brand> {
         desc: &str,
         enfopriority: i32,
         checkpriority: i32,
-        conshdlr: &'a C,
+        conshdlr: &'a mut C,
     ) {
         let c_name = CString::new(name).unwrap();
         let c_desc = CString::new(desc).unwrap();
 
-        extern "C" fn consenfolp<'brand, C: Conshdlr<'brand>>(
+        struct Data<'a, 'brand, C> {
+            problem: &'a Problem<'brand>,
+            conshdlr: &'a mut C,
+        }
+
+        extern "C" fn consenfolp<'a, 'brand: 'a, C: Conshdlr<'brand> + 'a> (
             scip: *mut SCIP,
             conshdlr: *mut SCIP_CONSHDLR,
             _conss: *mut *mut SCIP_CONS,
@@ -405,24 +412,16 @@ impl<'brand> Problem<'brand> {
             _solinfeasible: std::os::raw::c_uint,
             result: *mut SCIP_RESULT,
         ) -> SCIP_RETCODE {
-            let problem = ManuallyDrop::new(Problem {
-                scip: NonNull::new(scip).unwrap(),
-                vars: vec![],
-                cons: vec![],
-                _marker: Default::default()
-            });
             let data_ptr = unsafe { SCIPconshdlrGetData(conshdlr) };
             assert!(!data_ptr.is_null());
-            let conshdlr_ptr = data_ptr as *mut C;
+            let data_ptr = data_ptr as *mut Data<'a, 'brand, C>;
 
-            unsafe {
-                *result = (*conshdlr_ptr).enforce(&problem).into();
-            }
+            unsafe { *result = (*data_ptr).conshdlr.enforce((*data_ptr).problem).into(); }
 
             SCIP_Retcode_SCIP_OKAY
         }
 
-        extern "C" fn conscheck<'brand, C: Conshdlr<'brand>>(
+        extern "C" fn conscheck<'a, 'brand: 'a, C: Conshdlr<'brand> + 'a>(
             scip: *mut SCIP,
             conshdlr: *mut SCIP_CONSHDLR,
             _conss: *mut *mut SCIP_CONS,
@@ -434,21 +433,15 @@ impl<'brand> Problem<'brand> {
             _completely: ::std::os::raw::c_uint,
             result: *mut SCIP_RESULT,
         ) -> SCIP_RETCODE {
-            let problem = ManuallyDrop::new(Problem {
-                scip: NonNull::new(scip).unwrap(),
-                vars: vec![],
-                cons: vec![],
-                _marker: Default::default()
-            });
-            let solution = ManuallyDrop::new(Solution {
-                problem: &problem,
-                sol: NonNull::new(sol).unwrap(),
-            });
             let data_ptr = unsafe { SCIPconshdlrGetData(conshdlr) };
             assert!(!data_ptr.is_null());
-            let conshdlr_ptr = data_ptr as *mut C;
+            let data_ptr = data_ptr as *mut Data<'a, 'brand, C>;
+            let solution = Solution {
+                problem: unsafe { (*data_ptr).problem },
+                sol: NonNull::new(sol).unwrap(),
+            };
 
-            let feasible = unsafe { (*conshdlr_ptr).check(&problem, &solution).into() };
+            let feasible = unsafe { (*data_ptr).conshdlr.check((*data_ptr).problem, &solution).into() };
 
             unsafe {
                 *result = if feasible {
@@ -479,7 +472,10 @@ impl<'brand> Problem<'brand> {
             SCIP_Retcode_SCIP_OKAY
         }
 
-        let ptr = Box::into_raw(Box::new(conshdlr));
+        let ptr = Box::into_raw(Box::new(Data {
+            problem: self,
+            conshdlr,
+        }));
         let cons_faker = ptr as *mut SCIP_CONSHDLRDATA;
 
         let mut conshdlr: *mut SCIP_CONSHDLR = std::ptr::null_mut();
