@@ -361,7 +361,7 @@ impl<'brand, const EXACT: bool> Problem<'brand, EXACT> {
 
         unsafe {
             SCIPcreate(&mut scip);
-            //SCIPincludeDefaultPlugins(scip);
+            SCIPincludeDefaultPlugins(scip);
             if EXACT {
                 SCIPenableExactSolving(scip, 1);
             }
