@@ -517,6 +517,7 @@ impl<'brand, const EXACT: bool> Problem<'brand, EXACT> {
             _solinfeasible: std::os::raw::c_uint,
             result: *mut SCIP_RESULT,
         ) -> SCIP_RETCODE {
+            println!("Cons enforce called");
             let data_ptr = unsafe { SCIPconshdlrGetData(conshdlr) };
             assert!(!data_ptr.is_null());
             let data_ptr = data_ptr as *mut Data<'a, 'brand, C, EXACT>;
