@@ -293,6 +293,26 @@ impl <'brand> Problem<'brand, true> {
         }
         self.cons.borrow_mut().push(NonNull::new(cons).unwrap());
     }
+
+    pub fn value(&self, var: Var<'brand>) -> Ratio<isize> {
+        let mut res: *mut SCIP_Rational = null_mut();
+        unsafe {
+            SCIPrationalCreate(&mut res);
+
+            SCIPgetSolValExact(
+                self.scip.as_ptr(),
+                std::ptr::null_mut(),
+                var.var.as_ptr(),
+                res,
+            );
+            let result = Ratio::new(
+                SCIPrationalNumerator(res) as isize,
+                SCIPrationalDenominator(res) as isize,
+            );
+            SCIPrationalFree(&mut res);
+            result
+        }
+    }
 }
 
 impl <'brand> Problem<'brand, false> {
@@ -325,6 +345,10 @@ impl <'brand> Problem<'brand, false> {
             SCIPaddCons(self.scip.as_ptr(), cons);
         }
         self.cons.borrow_mut().push(NonNull::new(cons).unwrap());
+    }
+
+    pub fn value(&self, var: Var<'brand>) -> f64 {
+        unsafe { SCIPgetSolVal(self.scip.as_ptr(), std::ptr::null_mut(), var.var.as_ptr()) }
     }
 }
 
