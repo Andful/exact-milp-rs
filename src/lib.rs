@@ -1,3 +1,4 @@
+use num::ToPrimitive;
 use num::rational::Ratio;
 use scip_sys::*;
 use std::cell::RefCell;
@@ -41,17 +42,14 @@ impl From<ConshdlrResult> for SCIP_Result {
     }
 }
 
-pub trait Conshdlr<'brand> {
+pub trait Conshdlr<'brand, const EXACT: bool> {
     // Required methods
     fn check(
         &mut self,
-        problem: &Problem<'brand>,
-        solution: &Solution<'_, 'brand>
+        problem: &Problem<'brand, EXACT>,
+        solution: &Solution<'_, 'brand, EXACT>,
     ) -> bool;
-    fn enforce(
-        &mut self,
-        problem: &Problem<'brand>
-    ) -> ConshdlrResult;
+    fn enforce(&mut self, problem: &Problem<'brand, EXACT>) -> ConshdlrResult;
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -105,12 +103,12 @@ impl From<SCIP_Status> for Status {
 
 type InvariantLifetime<'brand> = std::marker::PhantomData<fn(&'brand ()) -> &'brand ()>;
 
-pub struct Solution<'a, 'brand> {
-    problem: &'a Problem<'brand>,
+pub struct Solution<'a, 'brand, const EXACT: bool = true> {
+    problem: &'a Problem<'brand, EXACT>,
     sol: NonNull<SCIP_SOL>,
 }
 
-impl<'a, 'brand> Solution<'a, 'brand> {
+impl<'a, 'brand> Solution<'a, 'brand, true> {
     pub fn value(&self, var: Var<'brand>) -> Ratio<isize> {
         let mut res: *mut SCIP_Rational = null_mut();
         unsafe {
@@ -132,7 +130,19 @@ impl<'a, 'brand> Solution<'a, 'brand> {
     }
 }
 
-pub struct Problem<'brand> {
+impl<'a, 'brand> Solution<'a, 'brand, false> {
+    pub fn value(&self, var: Var<'brand>) -> f64 {
+        unsafe {
+            SCIPgetSolVal(
+                self.problem.scip.as_ptr(),
+                self.sol.as_ptr(),
+                var.var.as_ptr(),
+            )
+        }
+    }
+}
+
+pub struct Problem<'brand, const EXACT: bool = true> {
     pub scip: NonNull<SCIP>,
     vars: Rc<RefCell<Vec<NonNull<SCIP_Var>>>>,
     cons: Rc<RefCell<Vec<NonNull<SCIP_Cons>>>>,
@@ -145,13 +155,13 @@ pub struct Var<'brand> {
     _marker: InvariantLifetime<'brand>,
 }
 
-pub struct VarBuilder<'a, 'brand> {
-    problem: &'a Problem<'brand>,
+pub struct VarBuilder<'a, 'brand, const EXACT: bool> {
+    problem: &'a Problem<'brand, EXACT>,
     var: NonNull<SCIP_Var>,
     _marker: InvariantLifetime<'brand>,
 }
 
-impl<'a, 'brand> VarBuilder<'a, 'brand> {
+impl<'a, 'brand> VarBuilder<'a, 'brand, true> {
     pub fn lb(self, lb: Ratio<isize>) -> Self {
         let mut new_lb: *mut SCIP_Rational = null_mut();
         unsafe {
@@ -184,7 +194,30 @@ impl<'a, 'brand> VarBuilder<'a, 'brand> {
         };
         self
     }
+}
 
+impl<'a, 'brand> VarBuilder<'a, 'brand, false> {
+    pub fn lb(self, lb: f64) -> Self {
+        unsafe {
+            SCIPchgVarLb(self.problem.scip.as_ptr(), self.var.as_ptr(), lb);
+        }
+        self
+    }
+
+    pub fn ub(self, ub: f64) -> Self {
+        unsafe {
+            SCIPchgVarUb(self.problem.scip.as_ptr(), self.var.as_ptr(), ub);
+        }
+        self
+    }
+
+    pub fn obj(self, obj: f64) -> Self {
+        unsafe { SCIPchgVarObj(self.problem.scip.as_ptr(), self.var.as_ptr(), obj) };
+        self
+    }
+}
+
+impl<'a, 'brand, const EXACT: bool> VarBuilder<'a, 'brand, EXACT> {
     pub fn integer(self) -> Self {
         let mut _b: c_uint = 0;
         unsafe {
@@ -208,72 +241,8 @@ impl<'a, 'brand> VarBuilder<'a, 'brand> {
     }
 }
 
-impl<'brand> Problem<'brand> {
-    pub fn new<R, F>(name: &str, fun: F) -> R
-    where
-        for<'new_brand> F: FnOnce(&mut Problem<'new_brand>) -> R,
-    {
-        let mut scip = null_mut();
-
-        unsafe {
-            SCIPcreate(&mut scip);
-            SCIPincludeDefaultPlugins(scip);
-            SCIPenableExactSolving(scip, 1);
-            SCIPcreateProbBasic(scip, CString::new(name).unwrap().as_ptr());
-        };
-
-        let mut problem = Self {
-            scip: NonNull::new(scip).unwrap(),
-            vars: Rc::new(RefCell::new(Vec::new())),
-            cons: Rc::new(RefCell::new(Vec::new())),
-            _marker: InvariantLifetime::default(),
-        };
-
-        let result = fun(&mut problem);
-
-        let Self {
-            scip, vars, cons, ..
-        } = problem;
-        for mut c in std::mem::take(&mut *cons.borrow_mut()).into_iter().map(|c| c.as_ptr()) {
-            unsafe { SCIPreleaseCons(scip.as_ptr(), &mut c) };
-        }
-        for mut v in  std::mem::take(&mut *vars.borrow_mut()).into_iter().map(|v| v.as_ptr()) {
-            unsafe {
-                SCIPreleaseVar(scip.as_ptr(), &mut v);
-            };
-        }
-        unsafe { SCIPfree(&mut scip.as_ptr()) };
-
-        result
-    }
-
-    pub fn var(&self, name: &str) -> VarBuilder<'_, 'brand> {
-        let mut var: *mut SCIP_Var = null_mut();
-        unsafe {
-            SCIPcreateVarBasic(
-                self.scip.as_ptr(),
-                &mut var,
-                CString::new(name).unwrap().as_c_str().as_ptr(),
-                -SCIPinfinity(self.scip.as_ptr()),
-                SCIPinfinity(self.scip.as_ptr()),
-                0.0,
-                SCIP_Vartype_SCIP_VARTYPE_CONTINUOUS,
-            );
-            SCIPaddVarExactData(self.scip.as_ptr(), var, null_mut(), null_mut(), null_mut());
-        };
-
-        let var = NonNull::new(var).unwrap();
-
-        self.vars.borrow_mut().push(var);
-
-        VarBuilder {
-            var,
-            problem: self,
-            _marker: Default::default(),
-        }
-    }
-
-    pub fn add_constraint(
+impl <'brand> Problem<'brand, true> {
+        pub fn add_constraint(
         &self,
         name: &str,
         lhs: Option<Ratio<isize>>,
@@ -324,8 +293,117 @@ impl<'brand> Problem<'brand> {
         }
         self.cons.borrow_mut().push(NonNull::new(cons).unwrap());
     }
+}
 
-    pub fn solve(&self) -> Option<Solution<'_, 'brand>> {
+impl <'brand> Problem<'brand, false> {
+        pub fn add_constraint(
+        &self,
+        name: &str,
+        lhs: Option<f64>,
+        vals: &[f64],
+        vars: &[Var<'brand>],
+        rhs: Option<f64>,
+    ) {
+        assert_eq!(vals.len(), vars.len());
+        let mut cons = null_mut();
+        
+        unsafe {
+            SCIPcreateConsBasicLinear(
+                self.scip.as_ptr(),
+                &mut cons,
+                CString::new(name).unwrap().as_c_str().as_ptr(),
+                vars.len() as i32,
+                vars.iter()
+                    .map(|e| e.var.as_ptr())
+                    .collect::<Vec<_>>()
+                    .as_mut_ptr(),
+                vals.as_ptr() as *mut f64,
+                lhs.unwrap_or(-SCIPinfinity(self.scip.as_ptr())),
+                rhs.unwrap_or(SCIPinfinity(self.scip.as_ptr())),
+            );
+
+            SCIPaddCons(self.scip.as_ptr(), cons);
+        }
+        self.cons.borrow_mut().push(NonNull::new(cons).unwrap());
+    }
+}
+
+impl<'brand, const EXACT: bool> Problem<'brand, EXACT> {
+    pub fn new<R, F>(name: &str, fun: F) -> R
+    where
+        for<'new_brand> F: FnOnce(&mut Problem<'new_brand, EXACT>) -> R,
+    {
+        let mut scip = null_mut();
+
+        unsafe {
+            SCIPcreate(&mut scip);
+            SCIPincludeDefaultPlugins(scip);
+            if EXACT {
+                SCIPenableExactSolving(scip, 1);
+            }
+            SCIPcreateProbBasic(scip, CString::new(name).unwrap().as_ptr());
+        };
+
+        let mut problem = Self {
+            scip: NonNull::new(scip).unwrap(),
+            vars: Rc::new(RefCell::new(Vec::new())),
+            cons: Rc::new(RefCell::new(Vec::new())),
+            _marker: InvariantLifetime::default(),
+        };
+
+        let result = fun(&mut problem);
+
+        let Self {
+            scip, vars, cons, ..
+        } = problem;
+        for mut c in std::mem::take(&mut *cons.borrow_mut())
+            .into_iter()
+            .map(|c| c.as_ptr())
+        {
+            unsafe { SCIPreleaseCons(scip.as_ptr(), &mut c) };
+        }
+        for mut v in std::mem::take(&mut *vars.borrow_mut())
+            .into_iter()
+            .map(|v| v.as_ptr())
+        {
+            unsafe {
+                SCIPreleaseVar(scip.as_ptr(), &mut v);
+            };
+        }
+        unsafe { SCIPfree(&mut scip.as_ptr()) };
+
+        result
+    }
+
+    pub fn var(&self, name: &str) -> VarBuilder<'_, 'brand, EXACT> {
+        let mut var: *mut SCIP_Var = null_mut();
+        unsafe {
+            SCIPcreateVarBasic(
+                self.scip.as_ptr(),
+                &mut var,
+                CString::new(name).unwrap().as_c_str().as_ptr(),
+                -SCIPinfinity(self.scip.as_ptr()),
+                SCIPinfinity(self.scip.as_ptr()),
+                0.0,
+                SCIP_Vartype_SCIP_VARTYPE_CONTINUOUS,
+            );
+            if EXACT {
+                SCIPaddVarExactData(self.scip.as_ptr(), var, null_mut(), null_mut(), null_mut());
+            }
+        };
+
+        let var = NonNull::new(var).unwrap();
+
+        self.vars.borrow_mut().push(var);
+
+        VarBuilder {
+            var,
+            problem: self,
+            _marker: Default::default(),
+        }
+    }
+
+    pub fn solve(&self) -> Option<Solution<'_, 'brand, EXACT>> {
         let solution: *mut SCIP_SOL = unsafe {
             SCIPsolve(self.scip.as_ptr());
             SCIPgetBestSol(self.scip.as_ptr())
@@ -334,10 +412,8 @@ impl<'brand> Problem<'brand> {
         NonNull::new(solution).map(|sol| Solution { problem: self, sol })
     }
 
-    pub fn get_best_solution(&self) -> Option<Solution<'_, 'brand>> {
-        let solution: *mut SCIP_SOL = unsafe {
-            SCIPgetBestSol(self.scip.as_ptr())
-        };
+    pub fn get_best_solution(&self) -> Option<Solution<'_, 'brand, EXACT>> {
+        let solution: *mut SCIP_SOL = unsafe { SCIPgetBestSol(self.scip.as_ptr()) };
 
         NonNull::new(solution).map(|sol| Solution { problem: self, sol })
     }
@@ -387,7 +463,7 @@ impl<'brand> Problem<'brand> {
         }
     }
 
-    pub fn include_conshdlr<'a, C: Conshdlr<'brand> + 'a>(
+    pub fn include_conshdlr<'a, C: Conshdlr<'brand, EXACT> + 'a>(
         &'a self,
         name: &str,
         desc: &str,
@@ -398,12 +474,17 @@ impl<'brand> Problem<'brand> {
         let c_name = CString::new(name).unwrap();
         let c_desc = CString::new(desc).unwrap();
 
-        struct Data<'a, 'brand, C> {
-            problem: &'a Problem<'brand>,
+        struct Data<'a, 'brand, C, const EXACT: bool> {
+            problem: &'a Problem<'brand, EXACT>,
             conshdlr: &'a mut C,
         }
 
-        extern "C" fn consenfolp<'a, 'brand: 'a, C: Conshdlr<'brand> + 'a> (
+        extern "C" fn consenfolp<
+            'a,
+            'brand: 'a,
+            C: Conshdlr<'brand, EXACT> + 'a,
+            const EXACT: bool,
+        >(
             scip: *mut SCIP,
             conshdlr: *mut SCIP_CONSHDLR,
             _conss: *mut *mut SCIP_CONS,
@@ -412,17 +493,23 @@ impl<'brand> Problem<'brand> {
             _solinfeasible: std::os::raw::c_uint,
             result: *mut SCIP_RESULT,
         ) -> SCIP_RETCODE {
-            println!("Called 3");
             let data_ptr = unsafe { SCIPconshdlrGetData(conshdlr) };
             assert!(!data_ptr.is_null());
-            let data_ptr = data_ptr as *mut Data<'a, 'brand, C>;
+            let data_ptr = data_ptr as *mut Data<'a, 'brand, C, EXACT>;
 
-            unsafe { *result = (*data_ptr).conshdlr.enforce((*data_ptr).problem).into(); }
+            unsafe {
+                *result = (*data_ptr).conshdlr.enforce((*data_ptr).problem).into();
+            }
 
             SCIP_Retcode_SCIP_OKAY
         }
 
-        extern "C" fn conscheck<'a, 'brand: 'a, C: Conshdlr<'brand> + 'a>(
+        extern "C" fn conscheck<
+            'a,
+            'brand: 'a,
+            C: Conshdlr<'brand, EXACT> + 'a,
+            const EXACT: bool,
+        >(
             scip: *mut SCIP,
             conshdlr: *mut SCIP_CONSHDLR,
             _conss: *mut *mut SCIP_CONS,
@@ -434,16 +521,20 @@ impl<'brand> Problem<'brand> {
             _completely: ::std::os::raw::c_uint,
             result: *mut SCIP_RESULT,
         ) -> SCIP_RETCODE {
-            println!("Called 2");
             let data_ptr = unsafe { SCIPconshdlrGetData(conshdlr) };
             assert!(!data_ptr.is_null());
-            let data_ptr = data_ptr as *mut Data<'a, 'brand, C>;
+            let data_ptr = data_ptr as *mut Data<'a, 'brand, C, EXACT>;
             let solution = Solution {
                 problem: unsafe { (*data_ptr).problem },
                 sol: NonNull::new(sol).unwrap(),
             };
 
-            let feasible = unsafe { (*data_ptr).conshdlr.check((*data_ptr).problem, &solution).into() };
+            let feasible = unsafe {
+                (*data_ptr)
+                    .conshdlr
+                    .check((*data_ptr).problem, &solution)
+                    .into()
+            };
 
             unsafe {
                 *result = if feasible {
@@ -467,18 +558,25 @@ impl<'brand> Problem<'brand> {
             SCIP_Retcode_SCIP_OKAY
         }
 
-        extern "C" fn consfree(
-            _scip: *mut SCIP,
-            _conshdlr: *mut SCIP_CONSHDLR,
-        ) -> SCIP_Retcode {
-            println!("Called 4");
+        extern "C" fn consfree<
+            'a,
+            'brand: 'a,
+            C: Conshdlr<'brand, EXACT> + 'a,
+            const EXACT: bool,
+        >(
+            scip: *mut SCIP,
+            conshdlr: *mut SCIP_CONSHDLR,
+        ) -> SCIP_RETCODE {
+            let data_ptr = unsafe { SCIPconshdlrGetData(conshdlr) };
+            assert!(!data_ptr.is_null());
+            drop(unsafe { Box::from_raw(data_ptr as *mut C) });
             SCIP_Retcode_SCIP_OKAY
         }
 
-        let ptr = Box::into_raw(Box::new(Data {
+        let ptr = Box::leak(Box::new(Data {
             problem: self,
             conshdlr,
-        }));
+        })) as *mut Data<C, EXACT>;
         let cons_faker = ptr as *mut SCIP_CONSHDLRDATA;
 
         let mut conshdlr: *mut SCIP_CONSHDLR = std::ptr::null_mut();
@@ -493,16 +591,17 @@ impl<'brand> Problem<'brand> {
                 checkpriority,
                 0,
                 false.into(),
-                Some(consenfolp::<C>),
+                Some(consenfolp::<C, EXACT>),
                 None,
-                Some(conscheck::<C>),
+                Some(conscheck::<C, EXACT>),
                 Some(conslock),
                 cons_faker,
             );
         }
 
-        unsafe { SCIPsetConshdlrFree(self.scip.as_ptr(), conshdlr, Some(consfree)); }
-        println!("Called 1");
+        unsafe {
+            SCIPsetConshdlrFree(self.scip.as_ptr(), conshdlr, Some(consfree::<C, EXACT>));
+        }
     }
 }
 
@@ -512,33 +611,33 @@ mod tests {
 
     #[test]
     fn test1() {
-        Problem::new("problem", |problem| {
+        Problem::<false>::new("problem", |problem| {
             // eample from https://www.mathsisfun.com/algebra/linear-programming.html
             let b = problem
                 .var("b")
-                .obj(Ratio::from_integer(-300))
+                .obj(-300.0)
                 .integer()
                 .build();
             let s = problem
                 .var("s")
-                .obj(Ratio::from_integer(-350))
+                .obj(-350.0)
                 .integer()
                 .build();
 
             problem.add_constraint(
                 "c1",
                 None,
-                &[Ratio::from_integer(5), Ratio::from_integer(4)],
+                &[5.0, 4.0],
                 &[b, s],
-                Some(Ratio::from_integer(80)),
+                Some(80.0),
             );
 
             problem.add_constraint(
                 "c2",
                 None,
-                &[Ratio::from_integer(3), Ratio::from_integer(4)],
+                &[3.0, 4.0],
                 &[b, s],
-                Some(Ratio::from_integer(60)),
+                Some(60.0),
             );
 
             let solution = problem.solve().unwrap();
