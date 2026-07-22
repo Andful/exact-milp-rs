@@ -252,6 +252,12 @@ impl<'brand> Problem<'brand> {
             );
         }
     }
+
+    pub fn hide_output(&self) {
+        unsafe {
+            SCIPsetMessagehdlrQuiet(self.scip.as_ptr(), 1);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -288,6 +294,8 @@ mod tests {
                 &[b, s],
                 Some(Ratio::from_integer(60)),
             );
+
+            problem.hide_output();
 
             let solution = problem.solve().unwrap();
 
