@@ -11,11 +11,18 @@ use std::str::FromStr;
 type InvariantLifetime<'brand> = std::marker::PhantomData<fn(&'brand ()) -> &'brand ()>;
 
 pub struct Solution<'a, 'brand> {
+    status: SCIP_Status,
     problem: &'a Problem<'brand>,
     sol: NonNull<SCIP_SOL>,
 }
 
 impl<'a, 'brand> Solution<'a, 'brand> {
+    pub fn is_infeasible(&self) -> bool {
+        self.status == SCIP_Status_SCIP_STATUS_INFEASIBLE
+    }
+    pub fn is_unbounded(&self) -> bool {
+        self.status == SCIP_Status_SCIP_STATUS_UNBOUNDED
+    }
     pub fn value(&self, var: Var<'brand>) -> Ratio<isize> {
         let mut res: *mut SCIP_Rational = null_mut();
         unsafe {
@@ -237,7 +244,11 @@ impl<'brand> Problem<'brand> {
             SCIPgetBestSol(self.scip.as_ptr())
         };
 
-        NonNull::new(solution).map(|sol| Solution { problem: self, sol })
+        NonNull::new(solution).map(|sol| Solution {
+            status: unsafe { SCIPgetStatus(self.scip.as_ptr()) },
+            problem: self,
+            sol,
+        })
     }
 
     pub fn export(&self, path: &Path) {
