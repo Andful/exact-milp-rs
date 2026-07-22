@@ -114,6 +114,7 @@ impl<'a, 'brand> VarBuilder<'a, 'brand> {
 }
 
 impl<'brand> Problem<'brand> {
+    #[warn(clippy::new_ret_no_self)]
     pub fn new<R, F>(name: &str, fun: F) -> R
     where
         for<'new_brand> F: FnOnce(&mut Problem<'new_brand>) -> R,
@@ -191,23 +192,23 @@ impl<'brand> Problem<'brand> {
         let mut rationals: *mut *mut SCIP_RATIONAL = null_mut();
         unsafe {
             SCIPrationalCreateArray(&mut rationals, vals.len() as i32 + 2);
-            let lhs_rational = *rationals.offset(vals.len() as isize);
+            let lhs_rational = *rationals.wrapping_add(vals.len());
             if let Some(lhs) = lhs {
                 SCIPrationalSetFraction(lhs_rational, *lhs.numer() as i64, *lhs.denom() as i64);
             } else {
                 SCIPrationalSetNegInfinity(lhs_rational);
             }
-            let rhs_rational = *rationals.offset(vals.len() as isize + 1);
+            let rhs_rational = *rationals.wrapping_add(vals.len() + 1);
             if let Some(rhs) = rhs {
                 SCIPrationalSetFraction(rhs_rational, *rhs.numer() as i64, *rhs.denom() as i64);
             } else {
                 SCIPrationalSetInfinity(rhs_rational);
             }
-            for i in 0..vals.len() {
+            for (i, val) in vals.iter().enumerate() {
                 SCIPrationalSetFraction(
-                    *rationals.offset(i as isize),
-                    *vals[i].numer() as i64,
-                    *vals[i].denom() as i64,
+                    *rationals.wrapping_add(i),
+                    *val.numer() as i64,
+                    *val.denom() as i64,
                 );
             }
             SCIPcreateConsBasicExactLinear(
