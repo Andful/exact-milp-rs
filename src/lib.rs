@@ -17,6 +17,9 @@ pub struct Solution<'a, 'brand> {
 }
 
 impl<'a, 'brand> Solution<'a, 'brand> {
+    pub fn status(&self) -> u32 {
+        self.status
+    }
     pub fn is_infeasible(&self) -> bool {
         self.status == SCIP_Status_SCIP_STATUS_INFEASIBLE
     }
